@@ -1,0 +1,59 @@
+name: Threshold Safe Bug Hunt
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  static-hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout hunter
+        uses: actions/checkout@v4
+
+      - name: Clone Threshold tBTC source
+        run: |
+          git clone --depth 200 \
+            https://github.com/threshold-network/tbtc-v2.git target
+
+      - name: Run safe source scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p findings
+
+          {
+            echo "# Threshold Source Scan"
+            echo
+            echo "Run: $(date -u)"
+            echo
+            echo "## Candidate patterns"
+            echo
+
+            grep -RInE \
+              --include="*.sol" \
+              'delegatecall|selfdestruct|tx\.origin|ecrecover|block\.timestamp|block\.number|transferFrom\(|call\{' \
+              target/solidity 2>/dev/null |
+              head -n 250 || true
+
+            echo
+            echo "## Safety rules"
+            echo "- Manual validation required."
+            echo "- Exclude known Immunefi issues."
+            echo "- Reproduce only on a local fork/private testnet."
+            echo "- Never attack mainnet or public testnets."
+            echo "- Never submit automatically."
+          } > findings/latest-scan.md
+
+      - name: Upload findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-scan
+          path: findings/latest-scan.md
+          retention-days: 7
