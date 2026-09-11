@@ -1,59 +1,343 @@
-name: Threshold Safe Bug Hunt
+name: Threshold AI Bug Hunter
 
 on:
   workflow_dispatch:
   schedule:
+    # Every day at 04:17 UTC = 09:47 IST
     - cron: "17 4 * * *"
 
 permissions:
   contents: read
 
+concurrency:
+  group: threshold-bug-hunt
+  cancel-in-progress: true
+
 jobs:
-  static-hunt:
+  hunt:
+    name: Safe Threshold Security Research
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
 
     steps:
+      # ---------------------------------------------------------
+      # 1. Get our hunter repository
+      # ---------------------------------------------------------
       - name: Checkout hunter
         uses: actions/checkout@v4
 
-      - name: Clone Threshold tBTC source
+      # ---------------------------------------------------------
+      # 2. Get Threshold source
+      # ---------------------------------------------------------
+      - name: Clone Threshold tBTC
         run: |
-          git clone --depth 200 \
+          git clone --depth 500 \
             https://github.com/threshold-network/tbtc-v2.git target
 
-      - name: Run safe source scan
+      - name: Record target revision
+        run: |
+          mkdir -p findings
+
+          cd target
+
+          echo "Target commit:" > ../findings/target.txt
+          git rev-parse HEAD >> ../findings/target.txt
+
+          echo "" >> ../findings/target.txt
+          echo "Recent commits:" >> ../findings/target.txt
+          git log --oneline -30 >> ../findings/target.txt
+
+      # ---------------------------------------------------------
+      # 3. Install analysis tools
+      # ---------------------------------------------------------
+      - name: Install analysis tools
+        run: |
+          python3 -m pip install --user semgrep
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # ---------------------------------------------------------
+      # 4. Static smart-contract analysis
+      # ---------------------------------------------------------
+      - name: Run Semgrep smart-contract scan
+        run: |
+          mkdir -p findings
+
+          semgrep \
+            --config p/smart-contracts \
+            --json \
+            --output findings/semgrep.json \
+            target/solidity || true
+
+      # ---------------------------------------------------------
+      # 5. Search security-sensitive code
+      # ---------------------------------------------------------
+      - name: Security surface scan
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p findings
 
           {
-            echo "# Threshold Source Scan"
+            echo "# Security Surface Scan"
             echo
-            echo "Run: $(date -u)"
-            echo
-            echo "## Candidate patterns"
+            echo "Generated: $(date -u)"
             echo
 
+            echo "## Authorization"
             grep -RInE \
               --include="*.sol" \
-              'delegatecall|selfdestruct|tx\.origin|ecrecover|block\.timestamp|block\.number|transferFrom\(|call\{' \
+              'onlyOwner|onlyBridge|onlyRole|hasRole|msg\.sender|_msgSender' \
               target/solidity 2>/dev/null |
-              head -n 250 || true
+              head -n 500 || true
 
             echo
-            echo "## Safety rules"
-            echo "- Manual validation required."
-            echo "- Exclude known Immunefi issues."
-            echo "- Reproduce only on a local fork/private testnet."
-            echo "- Never attack mainnet or public testnets."
-            echo "- Never submit automatically."
-          } > findings/latest-scan.md
+            echo "## External calls"
+            grep -RInE \
+              --include="*.sol" \
+              'delegatecall|call\{|staticcall|transferFrom|safeTransferFrom' \
+              target/solidity 2>/dev/null |
+              head -n 500 || true
 
-      - name: Upload findings
+            echo
+            echo "## Signature / authentication"
+            grep -RInE \
+              --include="*.sol" \
+              'ecrecover|ECDSA|permit|signature|nonce' \
+              target/solidity 2>/dev/null |
+              head -n 500 || true
+
+            echo
+            echo "## Accounting"
+            grep -RInE \
+              --include="*.sol" \
+              'mint|burn|balanceOf|allowance|increaseBalance|decreaseBalance' \
+              target/solidity 2>/dev/null |
+              head -n 700 || true
+
+            echo
+            echo "## Cross-chain / bridge"
+            grep -RInE \
+              --include="*.sol" \
+              'Wormhole|Gateway|Bridge|receiveTbtc|sendTbtc|completeTransfer|deposit' \
+              target/solidity 2>/dev/null |
+              head -n 700 || true
+
+            echo
+            echo "## Time / block dependence"
+            grep -RInE \
+              --include="*.sol" \
+              'block\.timestamp|block\.number|blockhash' \
+              target/solidity 2>/dev/null |
+              head -n 400 || true
+
+            echo
+            echo "## Dangerous low-level Solidity"
+            grep -RInE \
+              --include="*.sol" \
+              'assembly|unchecked|selfdestruct' \
+              target/solidity 2>/dev/null |
+              head -n 400 || true
+
+          } > findings/security-surface.md
+
+      # ---------------------------------------------------------
+      # 6. Historical security-fix research
+      # ---------------------------------------------------------
+      - name: Historical security analysis
+        shell: bash
+        run: |
+          {
+            echo "# Historical Security Analysis"
+            echo
+            echo "## Security-related commits"
+            echo
+
+            cd target
+
+            git log --all --oneline \
+              --grep="security\|vulnerability\|exploit\|audit\|critical\|high\|fix\|patch" \
+              -i |
+              head -n 300
+
+            echo
+            echo "## Recent Solidity changes"
+            git log --all --oneline -- solidity/ |
+              head -n 300
+
+          } > ../findings/history.md
+
+      # ---------------------------------------------------------
+      # 7. Search for old security advisories / references
+      # ---------------------------------------------------------
+      - name: Build known-issue filter
+        shell: bash
+        run: |
+          cat > findings/known-issues.md <<'EOF'
+# Known / Excluded Issue Filter
+
+This scanner must NOT automatically treat any of these as a bounty:
+
+- Previously published Threshold security advisories
+- Immunefi known issues
+- Previously reported vulnerabilities
+- Deprecated contracts
+- Out-of-scope assets
+- Privileged/admin-only compromise
+- Pure best-practice recommendations
+- DoS-only findings
+- Speculative economic attacks
+- UI-only problems without security impact
+- Scanner warnings without demonstrated impact
+- Mainnet exploitation
+- Public-testnet exploitation
+- Third-party-system attacks
+- Social engineering
+EOF
+
+      # ---------------------------------------------------------
+      # 8. Find high-value functions for manual/local analysis
+      # ---------------------------------------------------------
+      - name: Build candidate index
+        shell: bash
+        run: |
+          {
+            echo "# Candidate Index"
+            echo
+            echo "This is TRIAGE, not a bounty claim."
+            echo
+
+            echo "## Contract files"
+            find target/solidity -type f -name "*.sol" |
+              sort
+
+            echo
+            echo "## Functions involving value"
+            grep -RInE \
+              --include="*.sol" \
+              'function .*mint|function .*burn|function .*deposit|function .*redeem|function .*withdraw|function .*transfer|function .*approve' \
+              target/solidity 2>/dev/null |
+              head -n 1000 || true
+
+            echo
+            echo "## Functions involving authorization"
+            grep -RInE \
+              --include="*.sol" \
+              'function .*onlyOwner|function .*onlyBridge|function .*onlyRole|function .*authorize|function .*deauthorize' \
+              target/solidity 2>/dev/null |
+              head -n 1000 || true
+
+          } > findings/candidate-index.md
+
+      # ---------------------------------------------------------
+      # 9. Create strict validation checklist
+      # ---------------------------------------------------------
+      - name: Create bounty validation checklist
+        shell: bash
+        run: |
+          cat > findings/BOUNTY_VALIDATION.md <<'EOF'
+# Bounty Validation Checklist
+
+A finding is NOT considered a bounty unless ALL applicable checks pass.
+
+[ ] In-scope asset confirmed
+[ ] Vulnerable code exists in current relevant version
+[ ] Not a known Immunefi issue
+[ ] Not a public security advisory
+[ ] Not a duplicate
+[ ] Concrete attacker-controlled path
+[ ] Concrete security impact
+[ ] Impact matches Immunefi rules
+[ ] Reproducible locally
+[ ] Minimal PoC exists
+[ ] No mainnet exploitation performed
+[ ] No public-testnet exploitation performed
+[ ] No third-party attack required
+[ ] No privileged compromise required
+[ ] Report contains technical root cause
+[ ] Report contains exact affected asset
+[ ] Report contains reproduction steps
+[ ] Report contains impact
+[ ] Report contains PoC evidence
+
+IMPORTANT:
+A scanner warning alone is NOT a bounty.
+EOF
+
+      # ---------------------------------------------------------
+      # 10. Generate status
+      # ---------------------------------------------------------
+      - name: Generate status
+        shell: bash
+        run: |
+          cat > findings/STATUS.md <<EOF
+# 🤖 Threshold Bug Hunter Status
+
+Run time: $(date -u)
+
+## Current status
+
+🔵 **RESEARCH RUN COMPLETED**
+
+This does NOT mean a bounty was earned.
+
+A bounty can only be called:
+
+🟢 **BUG BOUNTY WON**
+
+after the project/Immunefi confirms the vulnerability and the reward is actually approved/paid.
+
+## Safety
+
+- No mainnet exploitation
+- No public-testnet exploitation
+- No wallet used
+- No money spent
+- No automatic Immunefi submission
+
+## Next stage
+
+Potential candidates must be manually validated and reproduced locally before any legitimate submission.
+EOF
+
+      # ---------------------------------------------------------
+      # 11. Create a single report bundle
+      # ---------------------------------------------------------
+      - name: Create research bundle
+        run: |
+          tar -czf threshold-research.tar.gz findings
+
+      # ---------------------------------------------------------
+      # 12. Upload everything as GitHub artifact
+      # ---------------------------------------------------------
+      - name: Upload research results
         uses: actions/upload-artifact@v4
         with:
-          name: threshold-scan
-          path: findings/latest-scan.md
-          retention-days: 7
+          name: threshold-ai-bug-hunt
+          path: |
+            findings/
+            threshold-research.tar.gz
+          retention-days: 14
+
+      # ---------------------------------------------------------
+      # 13. GitHub Actions summary
+      # ---------------------------------------------------------
+      - name: Write GitHub summary
+        run: |
+          {
+            echo "# 🤖 Threshold AI Bug Hunter"
+            echo
+            echo "## 📊 Research run completed"
+            echo
+            echo "🔵 **Research completed — bounty NOT confirmed**"
+            echo
+            echo "The complete research bundle is available in the workflow artifacts."
+            echo
+            echo "### Safety"
+            echo "- ✅ Local/source analysis only"
+            echo "- ✅ No mainnet attack"
+            echo "- ✅ No public-testnet attack"
+            echo "- ✅ No wallet required"
+            echo "- ✅ No money spent"
+            echo
+            echo "### Bounty rule"
+            echo "🟢 **BUG BOUNTY WON** is shown only after an actual project/Immunefi confirmation and payout."
+          } >> "$GITHUB_STEP_SUMMARY"
