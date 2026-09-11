@@ -1,6 +1,6 @@
 name: Threshold AI Bug Hunter
 
-on:
+"on":
   workflow_dispatch:
   schedule:
     # Every day at 04:17 UTC = 09:47 IST
@@ -20,15 +20,9 @@ jobs:
     timeout-minutes: 40
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Get our hunter repository
-      # ---------------------------------------------------------
       - name: Checkout hunter
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Get Threshold source
-      # ---------------------------------------------------------
       - name: Clone Threshold tBTC
         run: |
           git clone --depth 500 \
@@ -37,40 +31,31 @@ jobs:
       - name: Record target revision
         run: |
           mkdir -p findings
-
           cd target
+          {
+            echo "# Target Revision"
+            echo
+            echo "Commit:"
+            git rev-parse HEAD
+            echo
+            echo "Recent commits:"
+            git log --oneline -30
+          } > ../findings/target.txt
 
-          echo "Target commit:" > ../findings/target.txt
-          git rev-parse HEAD >> ../findings/target.txt
-
-          echo "" >> ../findings/target.txt
-          echo "Recent commits:" >> ../findings/target.txt
-          git log --oneline -30 >> ../findings/target.txt
-
-      # ---------------------------------------------------------
-      # 3. Install analysis tools
-      # ---------------------------------------------------------
       - name: Install analysis tools
         run: |
-          python3 -m pip install --user semgrep
+          python3 -m pip install --user --break-system-packages semgrep
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # ---------------------------------------------------------
-      # 4. Static smart-contract analysis
-      # ---------------------------------------------------------
-      - name: Run Semgrep smart-contract scan
+      - name: Run Semgrep
         run: |
           mkdir -p findings
-
           semgrep \
             --config p/smart-contracts \
             --json \
             --output findings/semgrep.json \
             target/solidity || true
 
-      # ---------------------------------------------------------
-      # 5. Search security-sensitive code
-      # ---------------------------------------------------------
       - name: Security surface scan
         shell: bash
         run: |
@@ -114,7 +99,7 @@ jobs:
               head -n 700 || true
 
             echo
-            echo "## Cross-chain / bridge"
+            echo "## Bridge / cross-chain"
             grep -RInE \
               --include="*.sol" \
               'Wormhole|Gateway|Bridge|receiveTbtc|sendTbtc|completeTransfer|deposit' \
@@ -130,18 +115,14 @@ jobs:
               head -n 400 || true
 
             echo
-            echo "## Dangerous low-level Solidity"
+            echo "## Low-level Solidity"
             grep -RInE \
               --include="*.sol" \
               'assembly|unchecked|selfdestruct' \
               target/solidity 2>/dev/null |
               head -n 400 || true
-
           } > findings/security-surface.md
 
-      # ---------------------------------------------------------
-      # 6. Historical security-fix research
-      # ---------------------------------------------------------
       - name: Historical security analysis
         shell: bash
         run: |
@@ -156,61 +137,66 @@ jobs:
             git log --all --oneline \
               --grep="security\|vulnerability\|exploit\|audit\|critical\|high\|fix\|patch" \
               -i |
-              head -n 300
+              head -n 300 || true
 
             echo
             echo "## Recent Solidity changes"
-            git log --all --oneline -- solidity/ |
-              head -n 300
 
+            git log --all --oneline -- solidity/ |
+              head -n 300 || true
           } > ../findings/history.md
 
-      # ---------------------------------------------------------
-      # 7. Search for old security advisories / references
-      # ---------------------------------------------------------
-      - name: Build known-issue filter
+      - name: Build known issue filter
         shell: bash
         run: |
           cat > findings/known-issues.md <<'EOF'
-# Known / Excluded Issue Filter
+          # Known / Excluded Issues
 
-This scanner must NOT automatically treat any of these as a bounty:
+          The following MUST NOT automatically become bounty reports.
 
-- Previously published Threshold security advisories
-- Immunefi known issues
-- Previously reported vulnerabilities
-- Deprecated contracts
-- Out-of-scope assets
-- Privileged/admin-only compromise
-- Pure best-practice recommendations
-- DoS-only findings
-- Speculative economic attacks
-- UI-only problems without security impact
-- Scanner warnings without demonstrated impact
-- Mainnet exploitation
-- Public-testnet exploitation
-- Third-party-system attacks
-- Social engineering
-EOF
+          - Public Threshold security advisories
+          - Immunefi known issues
+          - Previously reported vulnerabilities
+          - Duplicate findings
+          - Deprecated contracts
+          - Out-of-scope assets
+          - Admin-only compromise
+          - Privileged-address attacks
+          - Best-practice recommendations
+          - Feature requests
+          - DoS-only findings
+          - Speculative economic attacks
+          - UI-only issues without security impact
+          - Scanner warnings without demonstrated impact
+          - Mainnet exploitation
+          - Public-testnet exploitation
+          - Third-party system attacks
+          - Phishing
+          - Social engineering
 
-      # ---------------------------------------------------------
-      # 8. Find high-value functions for manual/local analysis
-      # ---------------------------------------------------------
+          A scanner result is only a candidate.
+
+          It is NOT automatically a valid bounty.
+          EOF
+
       - name: Build candidate index
         shell: bash
         run: |
           {
             echo "# Candidate Index"
             echo
-            echo "This is TRIAGE, not a bounty claim."
+            echo "Automated triage only."
             echo
 
-            echo "## Contract files"
-            find target/solidity -type f -name "*.sol" |
+            echo "## Solidity files"
+            find target/solidity \
+              -type f \
+              -name "*.sol" |
               sort
 
             echo
-            echo "## Functions involving value"
+            echo "## Value-changing functions"
+
             grep -RInE \
               --include="*.sol" \
               'function .*mint|function .*burn|function .*deposit|function .*redeem|function .*withdraw|function .*transfer|function .*approve' \
@@ -218,96 +204,86 @@ EOF
               head -n 1000 || true
 
             echo
-            echo "## Functions involving authorization"
+            echo "## Authorization functions"
+
             grep -RInE \
               --include="*.sol" \
-              'function .*onlyOwner|function .*onlyBridge|function .*onlyRole|function .*authorize|function .*deauthorize' \
+              'function .*authorize|function .*deauthorize|function .*onlyOwner|function .*onlyBridge|function .*onlyRole' \
               target/solidity 2>/dev/null |
               head -n 1000 || true
-
           } > findings/candidate-index.md
 
-      # ---------------------------------------------------------
-      # 9. Create strict validation checklist
-      # ---------------------------------------------------------
-      - name: Create bounty validation checklist
+      - name: Create validation checklist
         shell: bash
         run: |
           cat > findings/BOUNTY_VALIDATION.md <<'EOF'
-# Bounty Validation Checklist
+          # Bounty Validation Checklist
 
-A finding is NOT considered a bounty unless ALL applicable checks pass.
+          A candidate must pass these checks before it can be considered
+          for a legitimate bounty report.
 
-[ ] In-scope asset confirmed
-[ ] Vulnerable code exists in current relevant version
-[ ] Not a known Immunefi issue
-[ ] Not a public security advisory
-[ ] Not a duplicate
-[ ] Concrete attacker-controlled path
-[ ] Concrete security impact
-[ ] Impact matches Immunefi rules
-[ ] Reproducible locally
-[ ] Minimal PoC exists
-[ ] No mainnet exploitation performed
-[ ] No public-testnet exploitation performed
-[ ] No third-party attack required
-[ ] No privileged compromise required
-[ ] Report contains technical root cause
-[ ] Report contains exact affected asset
-[ ] Report contains reproduction steps
-[ ] Report contains impact
-[ ] Report contains PoC evidence
+          - [ ] In-scope asset confirmed
+          - [ ] Correct/current code version confirmed
+          - [ ] Not a known Immunefi issue
+          - [ ] Not a public security advisory
+          - [ ] Not a duplicate
+          - [ ] Concrete attacker-controlled path
+          - [ ] Concrete security impact
+          - [ ] Impact matches the bounty program
+          - [ ] Reproducible locally
+          - [ ] Runnable PoC exists
+          - [ ] No mainnet exploitation
+          - [ ] No public-testnet exploitation
+          - [ ] No third-party attack required
+          - [ ] No privileged compromise required
+          - [ ] Technical root cause identified
+          - [ ] Exact affected asset identified
+          - [ ] Reproduction steps documented
+          - [ ] Impact documented
+          - [ ] PoC evidence documented
 
-IMPORTANT:
-A scanner warning alone is NOT a bounty.
-EOF
+          IMPORTANT:
 
-      # ---------------------------------------------------------
-      # 10. Generate status
-      # ---------------------------------------------------------
+          A scanner warning alone is NOT a bounty.
+          EOF
+
       - name: Generate status
         shell: bash
         run: |
-          cat > findings/STATUS.md <<EOF
-# 🤖 Threshold Bug Hunter Status
+          cat > findings/STATUS.md <<'EOF'
+          # 🤖 Threshold AI Bug Hunter
 
-Run time: $(date -u)
+          ## Status
 
-## Current status
+          🔵 RESEARCH RUN COMPLETED
 
-🔵 **RESEARCH RUN COMPLETED**
+          This does NOT mean a bounty was earned.
 
-This does NOT mean a bounty was earned.
+          ## Safety
 
-A bounty can only be called:
+          - No mainnet exploitation
+          - No public-testnet exploitation
+          - No wallet required
+          - No money spent
+          - No automatic Immunefi submission
 
-🟢 **BUG BOUNTY WON**
+          ## Next stage
 
-after the project/Immunefi confirms the vulnerability and the reward is actually approved/paid.
+          Any candidate must be manually validated
+          and reproduced locally.
 
-## Safety
+          ## Bounty status
 
-- No mainnet exploitation
-- No public-testnet exploitation
-- No wallet used
-- No money spent
-- No automatic Immunefi submission
+          🟢 BUG BOUNTY WON
 
-## Next stage
+          can only be used after the project/Immunefi
+          actually confirms the vulnerability and reward.
+          EOF
 
-Potential candidates must be manually validated and reproduced locally before any legitimate submission.
-EOF
-
-      # ---------------------------------------------------------
-      # 11. Create a single report bundle
-      # ---------------------------------------------------------
       - name: Create research bundle
         run: |
           tar -czf threshold-research.tar.gz findings
 
-      # ---------------------------------------------------------
-      # 12. Upload everything as GitHub artifact
-      # ---------------------------------------------------------
       - name: Upload research results
         uses: actions/upload-artifact@v4
         with:
@@ -317,27 +293,26 @@ EOF
             threshold-research.tar.gz
           retention-days: 14
 
-      # ---------------------------------------------------------
-      # 13. GitHub Actions summary
-      # ---------------------------------------------------------
       - name: Write GitHub summary
         run: |
           {
             echo "# 🤖 Threshold AI Bug Hunter"
             echo
-            echo "## 📊 Research run completed"
+            echo "## 🔵 Research completed"
             echo
-            echo "🔵 **Research completed — bounty NOT confirmed**"
+            echo "Automated source analysis completed."
             echo
-            echo "The complete research bundle is available in the workflow artifacts."
+            echo "## Safety"
             echo
-            echo "### Safety"
-            echo "- ✅ Local/source analysis only"
-            echo "- ✅ No mainnet attack"
-            echo "- ✅ No public-testnet attack"
-            echo "- ✅ No wallet required"
-            echo "- ✅ No money spent"
+            echo "- No mainnet exploitation"
+            echo "- No public-testnet exploitation"
+            echo "- No wallet required"
+            echo "- No money spent"
+            echo "- No automatic bounty submission"
             echo
-            echo "### Bounty rule"
-            echo "🟢 **BUG BOUNTY WON** is shown only after an actual project/Immunefi confirmation and payout."
+            echo "## Important"
+            echo
+            echo "A scanner finding is NOT automatically a bounty."
+            echo
+            echo "🟢 BUG BOUNTY WON is only valid after actual project/Immunefi confirmation and payment."
           } >> "$GITHUB_STEP_SUMMARY"
